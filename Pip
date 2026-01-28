@@ -1,0 +1,13 @@
+# Inside game_loop, after score/time initialization:
+lives = 3
+
+# Replace collision block with:
+for ob in obstacles:
+    if player.colliderect(ob):
+        lives -= 1
+        obstacles.remove(ob)  # remove that obstacle
+        # reset player position
+        player = new_player()
+        if lives <= 0:
+            game_over = True
+        break
