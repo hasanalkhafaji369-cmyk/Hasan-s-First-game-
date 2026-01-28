@@ -1,0 +1,419 @@
+import pygame
+import random
+import sys
+
+# --- Configuration ---
+CELL_SIZE = 30
+COLS = 10
+ROWS = 20
+PLAY_WIDTH = CELL_SIZE * COLS
+PLAY_HEIGHT = CELL_SIZE * ROWS
+SIDE_PANEL = 200
+WIN_WIDTH = PLAY_WIDTH + SIDE_PANEL
+WIN_HEIGHT = PLAY_HEIGHT
+FPS = 60
+
+# Colors
+BLACK = (0, 0, 0)
+GRAY = (40, 40, 40)
+WHITE = (255, 255, 255)
+COLORS = [
+    (0, 255, 255),  # I - cyan
+    (0, 0, 255),    # J - blue
+    (255, 165, 0),  # L - orange
+    (255, 255, 0),  # O - yellow
+    (0, 255, 0),    # S - green
+    (128, 0, 128),  # T - purple
+    (255, 0, 0),    # Z - red
+]
+GHOST_ALPHA = 80  # not using per-rect alpha; we'll draw ghost lighter color
+
+# Tetromino shapes as 5x5 patterns (strings) with rotation states
+S = [['.....',
+      '.....',
+      '..00.',
+      '.00..',
+      '.....'],
+     ['.....',
+      '..0..',
+      '..00.',
+      '...0.',
+      '.....']]
+
+Z = [['.....',
+      '.....',
+      '.00..',
+      '..00.',
+      '.....'],
+     ['.....',
+      '..0..',
+      '.00..',
+      '.0...',
+      '.....']]
+
+I = [['..0..',
+      '..0..',
+      '..0..',
+      '..0..',
+      '.....'],
+     ['.....',
+      '0000.',
+      '.....',
+      '.....',
+      '.....']]
+
+O = [['.....',
+      '.....',
+      '.00..',
+      '.00..',
+      '.....']]
+
+J = [['.....',
+      '.0...',
+      '.000.',
+      '.....',
+      '.....'],
+     ['.....',
+      '..00.',
+      '..0..',
+      '..0..',
+      '.....'],
+     ['.....',
+      '.....',
+      '.000.',
+      '...0.',
+      '.....'],
+     ['.....',
+      '..0..',
+      '..0..',
+      '.00..',
+      '.....']]
+
+L = [['.....',
+      '...0.',
+      '.000.',
+      '.....',
+      '.....'],
+     ['.....',
+      '..0..',
+      '..0..',
+      '..00.',
+      '.....'],
+     ['.....',
+      '.....',
+      '.000.',
+      '.0...',
+      '.....'],
+     ['.....',
+      '.00..',
+      '..0..',
+      '..0..',
+      '.....']]
+
+T = [['.....',
+      '..0..',
+      '.000.',
+      '.....',
+      '.....'],
+     ['.....',
+      '..0..',
+      '..00.',
+      '..0..',
+      '.....'],
+     ['.....',
+      '.....',
+      '.000.',
+      '..0..',
+      '.....'],
+     ['.....',
+      '..0..',
+      '.00..',
+      '..0..',
+      '.....']]
+
+SHAPES = [I, J, L, O, S, T, Z]
+
+
+class Piece:
+    def __init__(self, x, y, shape_index):
+        self.x = x
+        self.y = y
+        self.shape_index = shape_index
+        self.shape = SHAPES[shape_index]
+        self.rotation = 0
+        self.color = COLORS[shape_index]
+
+    def image(self):
+        return self.shape[self.rotation % len(self.shape)]
+
+    def rotate(self):
+        self.rotation = (self.rotation + 1) % len(self.shape)
+
+
+def create_grid(locked_positions=None):
+    locked_positions = locked_positions or {}
+    grid = [[BLACK for _ in range(COLS)] for _ in range(ROWS)]
+    for (r, c), color in locked_positions.items():
+        if 0 <= r < ROWS and 0 <= c < COLS:
+            grid[r][c] = color
+    return grid
+
+
+def convert_shape_format(piece):
+    positions = []
+    fmt = piece.image()
+    for i, line in enumerate(fmt):
+        for j, ch in enumerate(line):
+            if ch == '0':
+                # offset by -2 to center 5x5 format
+                positions.append((piece.y + i - 2, piece.x + j - 2))
+    return positions
+
+
+def valid_space(piece, grid):
+    accepted = [(r, c) for r in range(ROWS) for c in range(COLS) if grid[r][c] == BLACK]
+    for pos in convert_shape_format(piece):
+        r, c = pos
+        if r < 0:
+            continue
+        if (r, c) not in accepted:
+            return False
+    return True
+
+
+def check_lost(locked):
+    for (r, c) in locked:
+        if r < 1:
+            return True
+    return False
+
+
+def get_shape():
+    return Piece(COLS // 2 - 2, 0, random.randint(0, len(SHAPES) - 1))
+
+
+def clear_rows(grid, locked):
+    """
+    Clear full rows in grid and update locked positions.
+    Return number of cleared rows.
+    """
+    cleared_rows = []
+    for r in range(ROWS):
+        if BLACK not in grid[r]:
+            cleared_rows.append(r)
+
+    if not cleared_rows:
+        return 0
+
+    # Remove locked positions in cleared rows
+    for r in cleared_rows:
+        for c in range(COLS):
+            if (r, c) in locked:
+                del locked[(r, c)]
+
+    # Shift rows above down
+    # For remaining locked positions, compute how many cleared rows are below each row
+    new_locked = {}
+    for (r, c), color in sorted(locked.items(), key=lambda x: x[0][0]):  # sort by row ascending
+        # count how many cleared rows are below current r
+        shift = sum(1 for cleared_row in cleared_rows if cleared_row > r)
+        new_locked[(r + shift, c)] = color
+    locked.clear()
+    locked.update(new_locked)
+    return len(cleared_rows)
+
+
+def draw_grid(surface):
+    for r in range(ROWS):
+        for c in range(COLS):
+            pygame.draw.rect(surface, GRAY, (c * CELL_SIZE, r * CELL_SIZE, CELL_SIZE, CELL_SIZE), 1)
+
+
+def draw_window(surface, grid, score=0, level=1, next_piece=None, ghost_positions=None):
+    surface.fill(BLACK)
+    # draw grid blocks
+    for r in range(ROWS):
+        for c in range(COLS):
+            pygame.draw.rect(surface, grid[r][c],
+                             (c * CELL_SIZE, r * CELL_SIZE, CELL_SIZE, CELL_SIZE))
+
+    # draw ghost (lighter color)
+    if ghost_positions:
+        for (r, c), color in ghost_positions:
+            lighter = tuple(min(255, int(x * 1.2)) for x in color)
+            pygame.draw.rect(surface, lighter,
+                             (c * CELL_SIZE, r * CELL_SIZE, CELL_SIZE, CELL_SIZE), 2)
+
+    draw_grid(surface)
+
+    # side panel (score, level, next)
+    font = pygame.font.SysFont('comicsans', 24)
+    score_label = font.render(f"Score: {score}", True, WHITE)
+    level_label = font.render(f"Level: {level}", True, WHITE)
+    surface.blit(score_label, (PLAY_WIDTH + 20, 20))
+    surface.blit(level_label, (PLAY_WIDTH + 20, 50))
+
+    if next_piece:
+        nx = PLAY_WIDTH + 40
+        ny = 120
+        surface.blit(font.render("Next:", True, WHITE), (nx, ny - 30))
+        fmt = next_piece.image()
+        for i, line in enumerate(fmt):
+            for j, ch in enumerate(line):
+                if ch == '0':
+                    pygame.draw.rect(surface, next_piece.color,
+                                     (nx + j * (CELL_SIZE // 2), ny + i * (CELL_SIZE // 2),
+                                      CELL_SIZE // 2, CELL_SIZE // 2))
+
+
+def get_ghost_positions(piece, grid):
+    ghost = Piece(piece.x, piece.y, piece.shape_index)
+    ghost.rotation = piece.rotation
+    # drop until invalid
+    while True:
+        ghost.y += 1
+        if not valid_space(ghost, grid):
+            ghost.y -= 1
+            break
+    positions = [(r, c) for (r, c) in convert_shape_format(ghost) if r >= 0]
+    return [(pos, piece.color) for pos in positions]
+
+
+def main():
+    pygame.init()
+    win = pygame.display.set_mode((WIN_WIDTH, WIN_HEIGHT))
+    pygame.display.set_caption("Tetris")
+    clock = pygame.time.Clock()
+
+    locked_positions = {}
+    grid = create_grid(locked_positions)
+
+    change_piece = False
+    run = True
+    current_piece = get_shape()
+    next_piece = get_shape()
+    fall_time = 0
+    fall_speed = 0.5  # seconds to fall one cell
+    level = 1
+    score = 0
+
+    while run:
+        dt = clock.tick(FPS) / 1000.0
+        fall_time += dt
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_LEFT:
+                    current_piece.x -= 1
+                    if not valid_space(current_piece, grid):
+                        current_piece.x += 1
+                elif event.key == pygame.K_RIGHT:
+                    current_piece.x += 1
+                    if not valid_space(current_piece, grid):
+                        current_piece.x -= 1
+                elif event.key == pygame.K_DOWN:
+                    current_piece.y += 1
+                    if not valid_space(current_piece, grid):
+                        current_piece.y -= 1
+                elif event.key == pygame.K_UP:
+                    current_piece.rotate()
+                    if not valid_space(current_piece, grid):
+                        # naive wall-kick: try left, then right, else revert rotation
+                        current_piece.x -= 1
+                        if not valid_space(current_piece, grid):
+                            current_piece.x += 2
+                            if not valid_space(current_piece, grid):
+                                current_piece.x -= 1
+                                current_piece.rotation = (current_piece.rotation - 1) % len(current_piece.shape)
+                elif event.key == pygame.K_SPACE:
+                    # hard drop
+                    while valid_space(current_piece, grid):
+                        current_piece.y += 1
+                    current_piece.y -= 1
+                    change_piece = True
+                elif event.key == pygame.K_ESCAPE:
+                    pygame.quit()
+                    sys.exit()
+
+        # automatic falling
+        if fall_time >= fall_speed:
+            fall_time = 0
+            current_piece.y += 1
+            if not valid_space(current_piece, grid):
+                current_piece.y -= 1
+                change_piece = True
+
+        # update grid with locked positions
+        grid = create_grid(locked_positions)
+        for pos in convert_shape_format(current_piece):
+            r, c = pos
+            if r >= 0:
+                grid[r][c] = current_piece.color
+
+        # ghost positions (for drawing)
+        ghost = get_ghost_positions(current_piece, grid)
+
+        if change_piece:
+            # lock piece
+            for pos in convert_shape_format(current_piece):
+                r, c = pos
+                if r >= 0:
+                    locked_positions[(r, c)] = current_piece.color
+
+            # check and clear rows
+            cleared = clear_rows(grid, locked_positions)
+            if cleared > 0:
+                # scoring: 100 * (2^(cleared-1))
+                score += 100 * (2 ** (cleared - 1))
+                level = min(20, level + cleared)
+                fall_speed = max(0.03, 0.5 - (level - 1) * 0.02)
+
+            current_piece = next_piece
+            next_piece = get_shape()
+            change_piece = False
+
+            if check_lost(locked_positions):
+                # game over screen
+                font = pygame.font.SysFont('comicsans', 48)
+                win.fill(BLACK)
+                label = font.render("GAME OVER", True, WHITE)
+                win.blit(label, (PLAY_WIDTH // 2 - label.get_width() // 2, PLAY_HEIGHT // 2 - 40))
+                small = pygame.font.SysFont('comicsans', 24)
+                sub = small.render(f"Score: {score}", True, WHITE)
+                win.blit(sub, (PLAY_WIDTH // 2 - sub.get_width() // 2, PLAY_HEIGHT // 2 + 20))
+                info = small.render("Press R to restart or ESC to quit", True, WHITE)
+                win.blit(info, (PLAY_WIDTH // 2 - info.get_width() // 2, PLAY_HEIGHT // 2 + 60))
+                pygame.display.update()
+
+                waiting = True
+                while waiting:
+                    for ev in pygame.event.get():
+                        if ev.type == pygame.QUIT:
+                            pygame.quit()
+                            sys.exit()
+                        if ev.type == pygame.KEYDOWN:
+                            if ev.key == pygame.K_r:
+                                # restart
+                                locked_positions.clear()
+                                grid = create_grid(locked_positions)
+                                current_piece = get_shape()
+                                next_piece = get_shape()
+                                fall_time = 0
+                                fall_speed = 0.5
+                                level = 1
+                                score = 0
+                                waiting = False
+                            elif ev.key == pygame.K_ESCAPE:
+                                pygame.quit()
+                                sys.exit()
+
+        draw_window(win, grid, score=score, level=level, next_piece=next_piece, ghost_positions=ghost)
+        pygame.display.update()
+
+
+if __name__ == "__main__":
+    main()
